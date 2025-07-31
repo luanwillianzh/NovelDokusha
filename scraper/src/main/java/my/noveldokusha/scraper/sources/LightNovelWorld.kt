@@ -6,129 +6,140 @@ import my.noveldokusha.core.LanguageCode
 import my.noveldokusha.core.PagedList
 import my.noveldokusha.core.Response
 import my.noveldokusha.network.NetworkClient
-import my.noveldokusha.network.addPath
-import my.noveldokusha.network.toDocument
-import my.noveldokusha.network.toUrlBuilder
-import my.noveldokusha.network.toUrlBuilderSafe
-import my.noveldokusha.network.tryConnect
 import my.noveldokusha.scraper.R
 import my.noveldokusha.scraper.SourceInterface
-import my.noveldokusha.scraper.TextExtractor
 import my.noveldokusha.scraper.domain.BookResult
 import my.noveldokusha.scraper.domain.ChapterResult
-import org.jsoup.nodes.Document
+import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.Jsoup
 
-/**
- * Novel main page (chapter list) example:
- * https://www.lightnovelworld.com/novel/the-devil-does-not-need-to-be-defeated
- * Chapter url example:
- * https://www.lightnovelworld.com/novel/the-devil-does-not-need-to-be-defeated/1348-chapter-0
- */
-class LightNovelWorld(
+class FlaskNovelReader(
     private val networkClient: NetworkClient
 ) : SourceInterface.Catalog {
-    override val id = "light_novel_world"
-    override val nameStrId = R.string.source_name_light_novel_world
-    override val baseUrl = "https://www.lightnovelworld.com/"
-    override val catalogUrl = "https://www.lightnovelworld.com/genre/all/popular/all/"
-    override val iconUrl =
-        "https://static.lightnovelworld.com/content/img/lightnovelworld/favicon.png"
-    override val language = LanguageCode.ENGLISH
 
-    override suspend fun getChapterText(doc: Document): String = withContext(Dispatchers.Default) {
-        doc.selectFirst("#chapter-container")?.let(TextExtractor::get) ?: ""
+    override val id = "flask_novel_reader"
+    override val nameStrId = R.string.source_name_light_novel_world // Pode criar outro ID específico
+    override val baseUrl = "https://novel-reader-flask.vercel.app"
+    override val catalogUrl = "$baseUrl/api/lancamentos"
+    override val iconUrl = "" // Pode definir se quiser
+    override val language = LanguageCode.PORTUGUESE
+
+    override suspend fun getChapterText(doc: org.jsoup.nodes.Document): String {
+        return "" // Não usado com API direta
     }
 
-    override suspend fun getBookCoverImageUrl(
-        bookUrl: String
-    ): Response<String?> = withContext(Dispatchers.Default) {
-        tryConnect {
-            networkClient.get(bookUrl).toDocument()
-                .selectFirst(".cover > img[data-src]")
-                ?.attr("data-src")
+    override suspend fun getBookCoverImageUrl(bookUrl: String): Response<String?> =
+        withContext(Dispatchers.Default) {
+            try {
+                val novelId = bookUrl.removePrefix("$baseUrl/api/novel/")
+                val json = networkClient.get("$baseUrl/api/novel/$novelId").body?.string()
+                    ?: return@withContext Response.Failure("Resposta vazia")
+
+                val obj = JSONObject(json)
+                Response.Success("$baseUrl/static/${obj.getString("cover")}")
+            } catch (e: Exception) {
+                Response.Failure(e.message ?: "Erro desconhecido")
+            }
         }
-    }
 
-    override suspend fun getBookDescription(
-        bookUrl: String
-    ): Response<String?> = withContext(Dispatchers.Default) {
-        tryConnect {
-            networkClient.get(bookUrl).toDocument()
-                .selectFirst(".summary > .content")
-                ?.let { TextExtractor.get(it) }
+    override suspend fun getBookDescription(bookUrl: String): Response<String?> =
+        withContext(Dispatchers.Default) {
+            try {
+                val novelId = bookUrl.removePrefix("$baseUrl/api/novel/")
+                val json = networkClient.get("$baseUrl/api/novel/$novelId").body?.string()
+                    ?: return@withContext Response.Failure("Resposta vazia")
+
+                val obj = JSONObject(json)
+                Response.Success(obj.getString("desc"))
+            } catch (e: Exception) {
+                Response.Failure(e.message ?: "Erro ao obter descrição")
+            }
         }
-    }
 
-    override suspend fun getChapterList(
-        bookUrl: String
-    ): Response<List<ChapterResult>> = withContext(Dispatchers.Default) {
-        tryConnect {
-            val list = mutableListOf<ChapterResult>()
-            val baseChaptersUrl = bookUrl
-                .toUrlBuilderSafe()
-                .addPath("chapters")
+    override suspend fun getChapterList(bookUrl: String): Response<List<ChapterResult>> =
+        withContext(Dispatchers.Default) {
+            try {
+                val novelId = bookUrl.removePrefix("$baseUrl/api/novel/")
+                val json = networkClient.get("$baseUrl/api/novel/$novelId").body?.string()
+                    ?: return@withContext Response.Failure("Resposta vazia")
 
-            for (page in 1..Int.MAX_VALUE) {
-                val urlBuilder = baseChaptersUrl.addPath("page-$page")
+                val obj = JSONObject(json)
+                val chapters = obj.getJSONArray("chapters")
 
-                val res = networkClient.get(urlBuilder)
-                    .toDocument()
-                    .select(".chapter-list > li > a")
-                    .map {
-                        ChapterResult(
-                            title = it.attr("title"),
-                            url = baseUrl + it.attr("href").removePrefix("/")
-                        )
+                val result = mutableListOf<ChapterResult>()
+                for (i in 0 until chapters.length()) {
+                    val (title, url) = chapters.getJSONArray(i).let {
+                        it.getString(0) to it.getString(1)
                     }
-
-                if (res.isEmpty())
-                    break
-                list.addAll(res)
-            }
-            list
-        }
-    }
-
-    override suspend fun getCatalogList(
-        index: Int
-    ): Response<PagedList<BookResult>> = withContext(Dispatchers.Default) {
-        tryConnect {
-            val page = index + 1
-            val url = catalogUrl.toUrlBuilder()!!.apply {
-                if (page > 1) addPath(page.toString())
-            }
-            getBooksList(networkClient.get(url).toDocument(), index)
-        }
-    }
-
-
-    // TODO(): Fix the problem of only seeing the first page of the chapter list
-    override suspend fun getCatalogSearch(
-        index: Int,
-        input: String
-    ): Response<PagedList<BookResult>> {
-        return Response.Success(PagedList.createEmpty(index = index))
-    }
-
-    private fun getBooksList(doc: Document, index: Int) = doc
-        .select(".novel-item")
-        .mapNotNull {
-            val coverUrl =
-                it.selectFirst(".novel-cover > img[data-src]")?.attr("data-src") ?: ""
-            val book = it.selectFirst("a[title]") ?: return@mapNotNull null
-            BookResult(
-                title = book.attr("title"),
-                url = baseUrl + book.attr("href").removePrefix("/"),
-                coverImageUrl = coverUrl
-            )
-        }.let {
-            PagedList(
-                list = it,
-                index = index,
-                isLastPage = when (val nav = doc.selectFirst("ul.pagination")) {
-                    null -> true
-                    else -> nav.children().last()?.`is`(".active") ?: true
+                    result.add(
+                        ChapterResult(
+                            title = title,
+                            url = "$baseUrl/api/novel/$novelId/chapter/$url"
+                        )
+                    )
                 }
-            )
+
+                Response.Success(result)
+            } catch (e: Exception) {
+                Response.Failure(e.message ?: "Erro ao obter capítulos")
+            }
+        }
+
+    override suspend fun getCatalogList(index: Int): Response<PagedList<BookResult>> =
+        withContext(Dispatchers.Default) {
+            try {
+                // Por enquanto, API só fornece lançamentos sem paginação
+                if (index > 0) return@withContext Response.Success(PagedList.createEmpty(index))
+
+                val json = networkClient.get(catalogUrl).body?.string()
+                    ?: return@withContext Response.Failure("Resposta vazia")
+
+                val arr = JSONObject(json).getJSONArray("resultado")
+                val result = mutableListOf<BookResult>()
+
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    result.add(
+                        BookResult(
+                            title = item.getString("nome"),
+                            url = "$baseUrl/api/novel/${item.getString("url")}",
+                            coverImageUrl = "$baseUrl/static/${item.getString("cover")}"
+                        )
+                    )
+                }
+
+                Response.Success(PagedList(result, index, isLastPage = true))
+            } catch (e: Exception) {
+                Response.Failure(e.message ?: "Erro ao obter catálogo")
+            }
+        }
+
+    override suspend fun getCatalogSearch(index: Int, input: String): Response<PagedList<BookResult>> =
+        withContext(Dispatchers.Default) {
+            try {
+                if (index > 0) return@withContext Response.Success(PagedList.createEmpty(index))
+
+                val json = networkClient.get("$baseUrl/api/search/${input}").body?.string()
+                    ?: return@withContext Response.Failure("Resposta vazia")
+
+                val arr = JSONObject(json).getJSONArray("resultado")
+                val result = mutableListOf<BookResult>()
+
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    result.add(
+                        BookResult(
+                            title = item.getString("nome"),
+                            url = "$baseUrl/api/novel/${item.getString("url")}",
+                            coverImageUrl = "$baseUrl/static/${item.getString("cover")}"
+                        )
+                    )
+                }
+
+                Response.Success(PagedList(result, index, isLastPage = true))
+            } catch (e: Exception) {
+                Response.Failure(e.message ?: "Erro ao buscar")
+            }
         }
 }
